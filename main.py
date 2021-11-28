@@ -166,7 +166,14 @@ def run(
                 overall_batches += 1
 
         valid_loss = 0.0
-        iou, f1, acc, pre, rec = 0, 0, 0, 0, 0
+        iou_batch, f1_batch, accuracy_batch, precision_batch, recall_batch = (
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        old_iou, old_f1, old_acc, old_pre, old_rec = 0, 0, 0, 0, 0
 
         net.eval()
         # torch.cuda.empty_cache()
@@ -176,7 +183,8 @@ def run(
 
             # Load images and masks to computing device
             images = images.to(device=dev, dtype=torch.float32)
-            masks = masks.to(device=dev, dtype=torch.float32)
+            old_masks = masks.to(device=dev, dtype=torch.float32)
+            masks = masks.to(device=dev, dtype=torch.int)
 
             with torch.no_grad():
                 prediction = net(images)
@@ -185,47 +193,71 @@ def run(
             writer.add_scalar("Loss/val", loss, epoch)
             valid_loss += loss.item()
 
-            # Threshold at 0.5 between 0 and 1
+            # Threshold at 0.5
             prediction = prediction > 0.5
+            # masks.type(torch.IntTensor)
+            from torchmetrics.functional import iou, f1, accuracy, precision, recall
 
-            metrics = calculate_metrics(prediction, masks)
-            iou += metrics["iou"]
-            f1 += metrics["f1"]
-            acc += metrics["accuracy"]
-            pre += metrics["precision"]
-            rec += metrics["recall"]
+            iou_batch = iou_batch + iou(prediction, masks).item()
+            f1_batch = f1_batch + f1(prediction, masks, mdmc_average="global").item()
+            accuracy_batch = (
+                accuracy_batch
+                + accuracy(prediction, masks, mdmc_average="global").item()
+            )
+            precision_batch = (
+                precision_batch
+                + precision(prediction, masks, mdmc_average="global").item()
+            )
+            recall_batch = (
+                recall_batch + recall(prediction, masks, mdmc_average="global").item()
+            )
+
+            metrics = calculate_metrics(prediction, old_masks)
+            old_iou += metrics["iou"]
+            old_f1 += metrics["f1"]
+            old_acc += metrics["accuracy"]
+            old_pre += metrics["precision"]
+            old_rec += metrics["recall"]
 
         # Normalize Validation metrics
         valid_loss /= n_val
-        iou /= n_val
-        f1 /= n_val
-        acc /= n_val
-        pre /= n_val
-        rec /= n_val
+        iou_value = iou_batch / n_val
+        f1_value = f1_batch / n_val
+        acc_value = accuracy_batch / n_val
+        pre_value = precision_batch / n_val
+        rec_value = recall_batch / n_val
 
-        writer.add_scalar("metrics/IoU", iou, epoch)
-        writer.add_scalar("metrics/Accuracy", acc, epoch)
+        old_iou /= n_val
+        old_f1 /= n_val
+        old_acc /= n_val
+        old_pre /= n_val
+        old_rec /= n_val
+
+        writer.add_scalar("metrics/IoU", iou_value, epoch)
+        # writer.add_scalar("metrics/Accuracy", acc, epoch)
 
         # Validation message
         val_msg = f"Epoch {epoch+1}\n"
         val_msg += f"Training Loss: {train_loss / len(train_loader)}\tValidation Loss: {valid_loss} {(Fore.RED + '↑')+Fore.RESET if valid_loss > last_val_loss else (Fore.GREEN +'↓')+Fore.RESET}\n"
         val_msg += f"Validation Scores:\n"
-        val_msg += f"   this IoU:   {iou:.3f}\tbest_IoU: {best_IoU:.3f}\n"
-        val_msg += f"   F1:         {f1:.3f}\taccuracy:  {acc:.3f}\n"
-        val_msg += f"   precision:  {pre:.3f}\trecall:   {rec:.3f}\n"
+        val_msg += (
+            f"   this IoU:   {iou_value:.3f} {old_iou:.3f}\tbest_IoU: {best_IoU:.3f}\n"
+        )
+        val_msg += f"   F1:         {f1_value:.3f}  {old_f1:.3f}\taccuracy:  {acc_value:.3f}   {old_acc:.3f}\n"
+        val_msg += f"   precision:  {pre_value:.3f} {old_pre:.3f}\trecall:   {rec_value:.3f}   {old_pre:.3f}\n"
 
         print(val_msg)
         logging.info(val_msg)
 
         # Validation logg
         logg_file_pth = os.path.join(log_path, f"{start_datetime.isoformat()}.csv")
-        val_logging.val_metrics_logger(metrics, logg_file_pth)
+        # val_logging.val_metrics_logger(metrics, logg_file_pth)
 
         last_val_loss = valid_loss
 
-        if best_IoU < iou:
+        if best_IoU < iou_value:
             torch.save(net.state_dict(), os.path.join(save_path, f"best_model.pth"))
-            best_IoU = iou
+            best_IoU = iou_value
 
         # Saving State Dict
         torch.save(
@@ -234,13 +266,13 @@ def run(
 
         scheduler.step(train_loss / n_train)
 
-    hparams_dict = {
-        "lr": lr,
-        "batch_size": bs,
-        "epochs": epochs,
-        "optimizer": optimizer.__class__.__name__,
-        "loss": criterion.__class__.__name__,
-    }
+    # hparams_dict = {
+    #     "lr": lr,
+    #     "batch_size": bs,
+    #     "epochs": epochs,
+    #     "optimizer": optimizer.__class__.__name__,
+    #     "loss": criterion.__class__.__name__,
+    # }
 
     writer.flush()
     writer.close()
