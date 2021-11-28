@@ -1,33 +1,39 @@
-from dataset import RailData
-import torch
-from torch import optim
-import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
-from multiprocessing import cpu_count
-import pathlib
-from tqdm import tqdm
-from wcid import NetSeq
-import sys
-from validation.metrics import calculate_metrics
 import os
-import colorama
-from colorama import Fore, Back, Style
-from p_logging import val_logging
+import datetime
+from multiprocessing import cpu_count
+import logging
+
+from cv2 import transform
+import torch
+import torch.nn as nn
+from torch import optim
+from torch.utils.data import DataLoader
+from torch.utils.data import random_split
+from torch.utils.tensorboard import SummaryWriter
 from torchsummary import summary
 from torchvision import datasets
-import datetime
+from tqdm import tqdm
+import colorama
+from colorama import Fore, Back, Style
+
+from dataset import RailData
+from wcid import NetSeq
+from wcid import WCID
+from p_logging import val_logging
+from validation.metrics import calculate_metrics
 
 
-def train(
+def run(
     train_img,
     train_msk,
     val_img,
     val_msk,
-    res_scale=0.1,
+    resolution=(320, 160),
     epochs=5,
     bs=1,
     lr=1e-3,
     weights_pth=None,
+    save_path=None,
 ):
     """
 
@@ -44,13 +50,25 @@ def train(
     """
     # Training start time
     start_datetime = datetime.datetime.now()
+    writer = SummaryWriter(save_path)
+
+    log_path = os.path.join(save_path, "loggs/")
+    weighs_path = os.path.join(save_path, "weights/")
+
+    for dir in [log_path, weighs_path]:
+        if not os.path.exists(dir):
+            os.makedirs(dir)
+
+    logging.basicConfig(
+        level=logging.INFO, filename=os.path.join(save_path, "loggs/log.txt")
+    )
 
     # Computing device
-    # dev = "cuda" if torch.cuda.is_available() else "cpu"
-    dev = "cpu"
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Instance of neural network
-    net = NetSeq()
+    # net = NetSeq()
+    net = WCID(in_channels=3, n_classes=1)
     net = net.to(dev)
     # Prepare data parallel
     # net = nn.DataParallel(net)
@@ -66,8 +84,8 @@ def train(
         start_epoch = 0
 
     # Training and validation Dataset
-    train_dataset = RailData(train_img, train_msk, res_scale, transform=True)
-    val_dataset = RailData(val_img, val_msk, res_scale)
+    train_dataset = RailData(train_img, train_msk, resolution, transform=True)
+    val_dataset = RailData(val_img, val_msk, resolution)
 
     # Length of training and validation Dataset
     n_train = len(train_dataset)
@@ -93,21 +111,23 @@ def train(
 
     # Optimizer and learning rate scheduler
     # optimizer = optim.RMSprop(net.parameters(), lr=lr, momentum=0.9)  # weight_decay=1e-8
-    optimizer = optim.Adam(net.parameters(), lr=0.00001)
+    optimizer = optim.Adam(net.parameters(), lr=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-         optimizer, "max", patience=100, verbose=True
+        optimizer, "min", patience=10, verbose=True
     )
 
     # Loss function (binary cross entropy)
-    criterion = nn.BCEWithLogitsLoss()
+    # criterion = nn.BCEWithLogitsLoss()
+    criterion = nn.MSELoss()
 
     overall_batches = 0
     last_val_loss = float("inf")
+    best_IoU = 0
     # Training loop
     for epoch in range(start_epoch, epochs + start_epoch):
         net.to(dev)
         net.train()
-        epoch_loss = 0
+        train_loss = 0.0
         desc = f"Epoch {epoch + 1}/{epochs}"
         # Epoch progress bar
         with tqdm(total=n_train, desc=desc, leave=False, position=0) as bar:
@@ -123,133 +143,147 @@ def train(
                 # Load images and masks to computing device
                 images = images.to(device=dev, dtype=torch.float32)
                 masks = masks.to(device=dev, dtype=torch.float32)
-                # print(f"{images.device=}")
-                # print(f"{masks.device=}")
-                # print(f"{next(net.parameters()).device=}")
+
+                # Clear old gradients and loss backpropagation
+                optimizer.zero_grad()
 
                 # Predict masks from images
                 prediction = net(images)
 
                 # Calculate loss
                 loss = criterion(prediction, masks)
+                writer.add_scalar("Loss/train", loss, epoch)
 
-                # Accumulate batch loss to epoch loss
-                epoch_loss += loss.item()
-
-                # Clear old gradients and loss backpropagation
-                optimizer.zero_grad()
                 loss.backward()
+
                 # nn.utils.clip_grad_value_(net.parameters(), 0.1)  # Why???
                 optimizer.step()
+
+                # Accumulate batch loss to epoch loss
+                train_loss += loss.item()
 
                 # Increase batches counter
                 overall_batches += 1
 
-                # Validate 10 times per epoch with validation set
-                if False:   # overall_batches % (n_train // (10 * bs)) == 0:
-                    val_loss = 0
-                    iou, f1, acc, pre, rec = 0, 0, 0, 0, 0
-                    # Set neural net to evaluation state
-                    net.eval()
-                    for val_batch in val_loader:
+        valid_loss = 0.0
+        iou, f1, acc, pre, rec = 0, 0, 0, 0, 0
 
-                        # Get images from batch
-                        images = val_batch["image"]
-                        masks = val_batch["mask"]
+        net.eval()
+        # torch.cuda.empty_cache()
+        for batch in val_loader:
+            images = batch["image"]
+            masks = batch["mask"]
 
-                        # Load images and masks to computing device
-                        images = images.to(device=dev, dtype=torch.float32)
-                        masks = masks.to(device=dev, dtype=torch.float32)
+            # Load images and masks to computing device
+            images = images.to(device=dev, dtype=torch.float32)
+            masks = masks.to(device=dev, dtype=torch.float32)
 
-                        # Predict validation batch (no gradients needed)
-                        with torch.no_grad():
-                            prediction = net(images)
+            with torch.no_grad():
+                prediction = net(images)
 
-                        # Calculate validation loss
-                        criterion = nn.BCEWithLogitsLoss()
+            loss = criterion(prediction, masks)
+            writer.add_scalar("Loss/val", loss, epoch)
+            valid_loss += loss.item()
 
-                        # Validation loss
-                        loss = criterion(prediction, masks)
-                        val_loss += loss
+            # Threshold at 0.5 between 0 and 1
+            prediction = prediction > 0.5
 
-                        # Force prediction between 0 and 1
-                        # prediction = torch.sigmoid(prediction)
+            metrics = calculate_metrics(prediction, masks)
+            iou += metrics["iou"]
+            f1 += metrics["f1"]
+            acc += metrics["accuracy"]
+            pre += metrics["precision"]
+            rec += metrics["recall"]
 
-                        # Threshold at 0.5 between 0 and 1
-                        prediction = prediction > 0.5
+        # Normalize Validation metrics
+        valid_loss /= n_val
+        iou /= n_val
+        f1 /= n_val
+        acc /= n_val
+        pre /= n_val
+        rec /= n_val
 
-                        # TODO: Validation metrics
-                        metrics = calculate_metrics(prediction, masks)
-                        iou += metrics["iou"]
-                        f1 += metrics["f1"]
-                        acc += metrics["acc"]
-                        pre += metrics["pre"]
-                        rec += metrics["rec"]
+        writer.add_scalar("metrics/IoU", iou, epoch)
+        writer.add_scalar("metrics/Accuracy", acc, epoch)
 
-                    # Normalize Validation metrics
-                    val_loss /= n_val
-                    iou /= n_val
-                    f1 /= n_val
-                    acc /= n_val
-                    pre /= n_val
-                    rec /= n_val
+        # Validation message
+        val_msg = f"Epoch {epoch+1}\n"
+        val_msg += f"Training Loss: {train_loss / len(train_loader)}\tValidation Loss: {valid_loss} {(Fore.RED + '↑') if valid_loss > last_val_loss else (Fore.GREEN +'↓')+Fore.RESET}\n"
+        val_msg += f"Validation Scores:\n"
+        val_msg += f"   IoU:       {iou:.3f}\tF1:     {f1:.3f}\taccuracy: {acc:.3f}\n"
+        val_msg += f"   precision: {pre:.3f}\trecall: {rec:.3f}\n"
 
-                    # Validation message
-                    sys.stdout.write("\r\033[K")
-                    val_msg = f"    Validated with "
-                    val_msg += f"IoU: {iou:.1f} F1: {f1:.2f} ACC: {acc:.2f}"
-                    val_msg += f" Pre: {pre:.2f} Rec: {rec:.2f}"
-                    val_msg += f" Lss: {val_loss:.3e} ✓"
-                    val_msg += f" {(Fore.RED + '↑') if val_loss > last_val_loss else (Fore.GREEN +'↓')}"
-                    last_val_loss = val_loss
-                    print(val_msg)
+        print(val_msg)
+        logging.info(val_msg)
 
-                    # Validation logg
-                    logg_file_pth = os.path.join(
-                        "loggs/", f"{start_datetime.isoformat()}.csv"
-                    )
-                    val_logging.val_metrics_logger(metrics, logg_file_pth)
+        # Validation logg
+        logg_file_pth = os.path.join(log_path, f"{start_datetime.isoformat()}.csv")
+        val_logging.val_metrics_logger(metrics, logg_file_pth)
 
-        scheduler.step(epoch_loss / n_train)
-        epoch_msg = (
-            f"Trained epoch {epoch + 1:02d} with loss {epoch_loss / n_train:.3e} "
+        last_val_loss = valid_loss
+
+        if best_IoU < iou:
+            torch.save(net.state_dict(), os.path.join(save_path, f"best_model.pth"))
+            best_IoU = iou
+
+        # Saving State Dict
+        torch.save(
+            net.state_dict(), os.path.join(weighs_path, f"CP_epoch{epoch + 1}.pth")
         )
-        epoch_msg += f"at learning rate {optimizer.param_groups[0]['lr']:.3e} ✓"
-        print(epoch_msg)
 
-        # Save weights every epoch
-        weight_pth = "weight/"
-        pathlib.Path(weight_pth).mkdir(parents=True, exist_ok=True)
-        net.to("cpu")
-        torch.save(net.state_dict(), weight_pth + f"CP_epoch{epoch + 1}.pth")
-        net.to(dev)
+        scheduler.step(train_loss / n_train)
+
+    hparams_dict = {
+        "lr": lr,
+        "batch_size": bs,
+        "epochs": epochs,
+        "optimizer": optimizer.__class__.__name__,
+        "loss": criterion.__class__.__name__,
+    }
+
+    writer.flush()
+    writer.close()
 
 
 def main():
     colorama.init(autoreset=True)
 
-    # """
-    train_img = "/media/flo/External/files_not_unter_backup/nlb/smr/nlb_summer/img_h/trn_0/"
-    train_msk = "/media/flo/External/files_not_unter_backup/nlb/smr/nlb_summer/msk_track_bin/png_uint8_h/trn_0/"
-    val_img = "/media/flo/External/files_not_unter_backup/nlb/smr/nlb_summer/img_h/val_0/"
-    val_msk = "/media/flo/External/files_not_unter_backup/nlb/smr/nlb_summer/msk_track_bin/png_uint8_h/val_0/"
-    weights_pth = None  # "weight/CP_epoch26.pth"
-    train(
+    # train_img = "/home/s0559816/Desktop/mono/images/trn/"
+    # train_msk = "/home/s0559816/Desktop/mono/masks/trn/"
+
+    # val_img = "/home/s0559816/Desktop/mono/images/val/"
+    # val_msk = "/home/s0559816/Desktop/mono/masks/val/"
+
+    train_img = "/home/s0559816/Desktop/railway-segmentation/data/img/trn"
+    train_msk = "/home/s0559816/Desktop/railway-segmentation/data/msk/trn"
+
+    val_img = "/home/s0559816/Desktop/railway-segmentation/data/img/val"
+    val_msk = "/home/s0559816/Desktop/railway-segmentation/data/msk/val"
+    weights_pth = "runs/3/weights/CP_epoch50.pth"
+
+    save_path = "runs"
+
+    list_subfolders = [f.path for f in os.scandir(save_path) if f.is_dir()]
+    list_subfolders.sort()
+
+    head, tail = os.path.split(list_subfolders[-1])
+    new_tail = int(tail) + 1
+    save_path = os.path.join(head, str(new_tail))
+
+    os.makedirs(save_path, exist_ok=True)
+
+    run(
         train_img,
         train_msk,
         val_img,
         val_msk,
-        res_scale=0.2,
-        epochs=80000,
+        resolution=(320, 160),
+        epochs=100,
         bs=1,
         lr=1e-0,
         weights_pth=weights_pth,
+        save_path=save_path,
     )
-    """
-
-    model = NetSeq()
-    summary(model, (3, 160, 320), device="cpu", col_names=["input_size", "output_size", "num_params"])
-    """
 
 
 if __name__ == "__main__":
