@@ -74,7 +74,7 @@ def run(
     # net = nn.DataParallel(net)
 
     # Load weights
-    if weights_pth is not None:
+    if weights_pth is not None and os.path.exists(weights_pth):
         net.load_state_dict(torch.load(weights_pth, map_location=dev))
         weight_file_name = os.path.basename(weights_pth)
         weight_file_name = os.path.splitext(weight_file_name)[-2]
@@ -208,10 +208,11 @@ def run(
 
         # Validation message
         val_msg = f"Epoch {epoch+1}\n"
-        val_msg += f"Training Loss: {train_loss / len(train_loader)}\tValidation Loss: {valid_loss} {(Fore.RED + '↑') if valid_loss > last_val_loss else (Fore.GREEN +'↓')+Fore.RESET}\n"
+        val_msg += f"Training Loss: {train_loss / len(train_loader)}\tValidation Loss: {valid_loss} {(Fore.RED + '↑')+Fore.RESET if valid_loss > last_val_loss else (Fore.GREEN +'↓')+Fore.RESET}\n"
         val_msg += f"Validation Scores:\n"
-        val_msg += f"   IoU:       {iou:.3f}\tF1:     {f1:.3f}\taccuracy: {acc:.3f}\n"
-        val_msg += f"   precision: {pre:.3f}\trecall: {rec:.3f}\n"
+        val_msg += f"   this IoU:   {iou:.3f}\tbest_IoU: {best_IoU:.3f}\n"
+        val_msg += f"   F1:         {f1:.3f}\taccuracy:  {acc:.3f}\n"
+        val_msg += f"   precision:  {pre:.3f}\trecall:   {rec:.3f}\n"
 
         print(val_msg)
         logging.info(val_msg)
@@ -259,16 +260,22 @@ def main():
 
     val_img = "/home/s0559816/Desktop/railway-segmentation/data/img/val"
     val_msk = "/home/s0559816/Desktop/railway-segmentation/data/msk/val"
-    weights_pth = "runs/3/weights/CP_epoch50.pth"
+    weights_pth = None
 
     save_path = "runs"
 
-    list_subfolders = [f.path for f in os.scandir(save_path) if f.is_dir()]
-    list_subfolders.sort()
+    if os.path.exists(save_path):
+        list_subfolders = [f.path for f in os.scandir(save_path) if f.is_dir()]
+        list_subfolders.sort()
 
-    head, tail = os.path.split(list_subfolders[-1])
-    new_tail = int(tail) + 1
-    save_path = os.path.join(head, str(new_tail))
+        if list_subfolders:
+            head, tail = os.path.split(list_subfolders[-1])
+            new_tail = int(tail) + 1
+            save_path = os.path.join(head, str(new_tail))
+        else:
+            save_path = os.path.join(save_path, str(1))
+    else:
+        save_path = os.path.join(save_path, str(1))
 
     os.makedirs(save_path, exist_ok=True)
 

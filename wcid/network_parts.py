@@ -7,7 +7,7 @@ class WCID(nn.Module):
         self.in_channels = in_channels
         self.n_classes = n_classes
 
-        # Down Convolution
+        # Convolution
         self.blk1 = Down1(in_channels)
         self.blk2 = Down2()
         self.blk3 = Down3()
@@ -222,11 +222,6 @@ class Up4(nn.Module):
         self.l5 = nn.Sigmoid()
 
     def forward(self, x):
-        """
-
-        :param x:
-        :return:
-        """
         x = self.l1(x)
         x = self.l2(x)
         x = self.l3(x)
