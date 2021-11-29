@@ -125,8 +125,8 @@ def calculate_metrics(
     metrics = {
         "iou": iou_score(fn=fn, fp=fp, tp=tp),
         "f1": f1_score(fn=fn, fp=fp, tp=tp),
-        "acc": accuracy(tp=tp, fn=fn, tn=tn, fp=fp),
-        "pre": precision(tp=tp, fn=fn),
-        "rec": recall(fn=fn, tp=tp),
+        "accuracy": accuracy(tp=tp, fn=fn, tn=tn, fp=fp),
+        "precision": precision(tp=tp, fn=fn),
+        "recall": recall(fn=fn, tp=tp),
     }
     return metrics

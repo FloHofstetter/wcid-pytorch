@@ -7,16 +7,18 @@ import glob
 import os
 import albumentations as A
 from matplotlib.pyplot import get_cmap
+from typing import List, Tuple, Dict
 
 
 class RailData(Dataset):
     def __init__(
         self,
-        images_path,
-        mask_path,
-        res_scale,
+        images_path: str,
+        mask_path: str,
+        resolution: Tuple[int, int] = (320, 160),
+        mapping = {0:0, 1:1,},
         pix_scale="min_max",
-        transform=False
+        transform=False,
     ):
         """
         Initialize Dataset.
@@ -27,7 +29,7 @@ class RailData(Dataset):
         :param pix_scale: Scale of the pixels. Ether 'min_max' or 'std'.
         :return: None.
         """
-        self._res_scale = res_scale
+        self.resolution = resolution
         self._pix_scale = pix_scale
         self.transform = transform
 
@@ -40,10 +42,12 @@ class RailData(Dataset):
         masks_path = os.path.join(mask_path, "*.png")
         mask_paths = glob.glob(masks_path)
         self._mask_paths = sorted(mask_paths)
+        
+        self.mapping = mapping
 
         # Sanity checks
-        if 1 <= res_scale < 0:
-            err = f"Scale factor must be between 0 and 1, got {res_scale}"
+        if self.resolution[0] < 1 or self.resolution[1] < 1:
+            err = f"Resolution mus be grater than 1, got {self.resolution}"
             raise ValueError(err)
 
         if not len(self._image_paths) == len(self._mask_paths):
@@ -53,6 +57,12 @@ class RailData(Dataset):
                 + f" {len(self._mask_paths)} masks"
             )
             raise ValueError(err)
+
+    def mask_to_class(self, mask):
+        for i in self.mapping:
+            mask[mask==i] = self.mapping[i]
+        return mask
+
 
     def __len__(self):
         """
@@ -74,53 +84,58 @@ class RailData(Dataset):
         mask_img = Image.open(self._mask_paths[index])
 
         # Resize images and masks
-        width, height = image_img.size
-        new_width, new_height = width * self._res_scale, height * self._res_scale
-        new_width, new_height = round(new_width), round(new_height)
-        # image_img = image_img.resize((new_width, new_height))
-        # mask_img = mask_img.resize((new_width, new_height))
-        image_img = image_img.resize((160, 320))
-        mask_img = mask_img.resize((160, 320))
-
-        """
-        # List transformations
-        transform = A.Compose(
-            [
-                A.RandomResizedCrop(height=new_height, width=new_width, p=0.9, scale=(0.8, 1.0,)),
-                A.HorizontalFlip(p=0.5),
-                A.RandomBrightnessContrast(p=0.2),
-                A.Rotate(limit=(-2, 2,), p=0.9)
-            ]
+        image_img = image_img.resize(
+            size=(self.resolution[1], self.resolution[0]), resample=Image.BICUBIC
         )
-        """
+        mask_img = mask_img.resize(
+            size=(self.resolution[1], self.resolution[0]), resample=Image.NEAREST
+        )
 
         # Convert images and mask to array
         image_arr = np.asarray(image_img).copy()
         mask_arr = np.asarray(mask_img).copy()
 
         # Make sure only 2 classes
-        highest_class = np.max(mask_arr)
-        lowest_class = np.min(mask_arr)
-        if highest_class > 1 or lowest_class < 0:
-            classes = np.unique(mask_arr)
-            err = f"Expected two classes [0 1], got {len(classes)}: {classes}."
-            raise ValueError(err)
+            # highest_class = np.max(mask_arr)
+            # lowest_class = np.min(mask_arr)
+            # if highest_class > 1 or lowest_class < 0:
+                # join all non zero label together if more than 2 classes are present
+                # mask_arr = mask_arr.astype(bool).astype(np.uint8)
 
-        # Augment Images
-        """
+        # List transformations
+        transform = A.Compose(
+            [
+                A.RandomResizedCrop(
+                    height=self.resolution[1],
+                    width=self.resolution[0],
+                    p=0.0,
+                    scale=(0.8, 1.0),
+                ),
+                A.HorizontalFlip(p=0.5),
+                A.RandomBrightnessContrast(p=0.2),
+                A.Rotate(limit=(-2.5, 2.5), p=0.9),
+                A.MotionBlur(
+                    always_apply=False,
+                    p=0.1,
+                    blur_limit=(14, 20),
+                ),
+            ]
+        )
+
         if self.transform:
+            # Albumentations augmentation
             augmentations = transform(image=image_arr, mask=mask_arr)
             image_arr = augmentations["image"]
             mask_arr = augmentations["mask"]
-        """
 
         # Expand Mask dimenseion
         mask_arr = np.expand_dims(mask_arr, axis=0)
 
         # Cast datatype and normalize Image
         image_arr = image_arr.astype(np.float32)
-        mask_arr = mask_arr.astype(np.float32)
-
+        mask_arr = torch.from_numpy(np.array(mask_arr))
+        mask_arr = self.mask_to_class(mask_arr)
+        
         # Scale images
         if self._pix_scale == "min_max":
             image_arr /= 255
@@ -141,10 +156,10 @@ class RailData(Dataset):
 
         # Height width channels to channel height width
         img_trans = image_arr.transpose((2, 0, 1))
-        # print(f"{image_arr.shape=}")
-        # print(f"{mask_arr.shape=}")
+
+
 
         return {
-            "image": torch.from_numpy(img_trans).type(torch.FloatTensor),
-            "mask": torch.from_numpy(mask_arr).type(torch.FloatTensor),
+            "image": torch.from_numpy(img_trans).to(torch.float32),
+            "mask": mask_arr.to(torch.long),
         }

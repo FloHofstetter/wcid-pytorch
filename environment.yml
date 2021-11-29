@@ -1,0 +1,21 @@
+# run: conda env create --file environment.yml
+name: wcid-pytorch
+channels:
+  - defaults
+  - nvidia
+  - pytorch
+dependencies:
+  - python>=3.6
+  - nvidia::cudatoolkit=10.2
+  - pytorch::pytorch 
+  - pytorch::torchvision 
+  - pytorch::torchaudio 
+  - opencv
+  - tensorboard
+  - tqdm
+  - colorama
+  - pip
+  - pip:
+      - albumentations
+      - torchmetrics
+      - torchsummary
