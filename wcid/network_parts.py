@@ -1,5 +1,5 @@
 import torch.nn as nn
-
+import torch.nn.functional as F
 
 class WCID(nn.Module):
     def __init__(self, in_channels=3, n_classes=1):
@@ -218,13 +218,11 @@ class Up4(nn.Module):
 
         self.l2 = nn.ConvTranspose2d(16, 16, kernel_size=(3, 3), stride=(1, 1))
         self.l3 = nn.ReLU(inplace=True)
-        self.l4 = nn.ConvTranspose2d(16, 1, kernel_size=(3, 3), stride=(1, 1))
-        self.l5 = nn.Sigmoid()
+        self.l4 = nn.ConvTranspose2d(16, n_classes, kernel_size=(3, 3), stride=(1, 1))
 
     def forward(self, x):
         x = self.l1(x)
         x = self.l2(x)
         x = self.l3(x)
         x = self.l4(x)
-        x = self.l5(x)
         return x

@@ -1,8 +1,10 @@
 import glob
 import os
+import PIL
 
 import torch
 import torchvision
+import torchsummary 
 from PIL import Image
 import numpy as np
 from matplotlib.pyplot import get_cmap
@@ -10,6 +12,7 @@ from matplotlib.pyplot import get_cmap
 from wcid import WCID
 
 overlay = True
+n_classes = 1
 
 save_dir = "results/"
 inferred_dir = os.path.join(save_dir, "inferred")
@@ -20,12 +23,19 @@ for dir in [save_dir, inferred_dir, overlay_dir]:
         os.makedirs(dir)
 
 # Create the model
-model = WCID(in_channels=3, n_classes=1)
+model = WCID(in_channels=3, n_classes=n_classes)
 # Load state_dict
-model.load_state_dict(torch.load("runs/10/best_model.pth"))
+model.load_state_dict(torch.load("runs/1/best_model.pth"))
+# torchsummary.summary(model=model, input_size=(3, 1000, 2000))
+
+model.eval()
 
 val_img_path = "/home/s0559816/Desktop/railway-segmentation/data/img/val/"
+# val_img_path = "/home/s0559816/Desktop/mono/images/val/"
 val_img = glob.glob(f"{val_img_path}*.png")
+
+if n_classes > 2:
+    outputs = {}
 
 for image_path in val_img:
     image = Image.open(image_path)
@@ -36,18 +46,26 @@ for image_path in val_img:
     input = torch.unsqueeze(input, dim=0)
 
     # Set model to eval
-    model.eval()
     with torch.no_grad():
         output = model(input)
+        output = torch.sigmoid(output)
 
-    output = output.squeeze(0)
+    # post process output
+    # output = torch.nn.functional.sigmoid(output)
+    if n_classes <= 1:
+        output = output.cpu().numpy() 
+        output = np.squeeze(output) 
+        output = output > 0.5
+        output = (output * 255).astype(np.uint8)
 
-    colormap = get_cmap("jet")
-    out_image_arr = colormap(output)[:, :, :3] * 255
-    out_image_arr = out_image_arr.astype(np.uint8)
+        inferred_image = Image.fromarray(output)
+    else:
+        output_data = torch.nn.functional.softmax(output, dim=1).cpu().data
+        max_probs, predictions = output_data.max(1)
+        outputs['predictions'] = predictions
+        outputs['prob_mask'] = max_probs
 
-    # inferred_image = torchvision.transforms.ToPILImage()(output.squeeze(0))
-    inferred_image = Image.fromarray(out_image_arr)
+        inferred_image = Image.fromarray(predictions)
 
     if inferred_image.width != image.width or inferred_image.height != image.height:
         inferred_image.resize((image.width, image.height), resample=Image.BICUBIC)

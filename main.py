@@ -29,10 +29,12 @@ def run(
     val_img,
     val_msk,
     resolution=(320, 160),
+    number_classes=2,
+    mapping = {0:0, 1:1,},
     epochs=5,
     bs=1,
     lr=1e-3,
-    weights_pth=None,
+    weights_path=None,
     save_path=None,
 ):
     """
@@ -66,17 +68,19 @@ def run(
     # Computing device
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
+    print(f"Device used: {dev}")
+
     # Instance of neural network
     # net = NetSeq()
-    net = WCID(in_channels=3, n_classes=1)
+    net = WCID(in_channels=3, n_classes=number_classes)
     net = net.to(dev)
     # Prepare data parallel
     # net = nn.DataParallel(net)
 
     # Load weights
-    if weights_pth is not None and os.path.exists(weights_pth):
-        net.load_state_dict(torch.load(weights_pth, map_location=dev))
-        weight_file_name = os.path.basename(weights_pth)
+    if weights_path is not None and os.path.exists(weights_path):
+        net.load_state_dict(torch.load(weights_path, map_location=dev))
+        weight_file_name = os.path.basename(weights_path)
         weight_file_name = os.path.splitext(weight_file_name)[-2]
         start_epoch = int(weight_file_name.replace("CP_epoch", ""))
         print(f"Continue training in epoch {start_epoch + 1}")
@@ -84,8 +88,8 @@ def run(
         start_epoch = 0
 
     # Training and validation Dataset
-    train_dataset = RailData(train_img, train_msk, resolution, transform=True)
-    val_dataset = RailData(val_img, val_msk, resolution)
+    train_dataset = RailData(train_img, train_msk, resolution, mapping, transform=True)
+    val_dataset = RailData(val_img, val_msk, resolution, mapping, )
 
     # Length of training and validation Dataset
     n_train = len(train_dataset)
@@ -116,9 +120,10 @@ def run(
         optimizer, "min", patience=10, verbose=True
     )
 
-    # Loss function (binary cross entropy)
-    # criterion = nn.BCEWithLogitsLoss()
-    criterion = nn.MSELoss()
+    if number_classes <= 2:
+        criterion = nn.MSELoss()
+    else:
+        criterion = nn.CrossEntropyLoss()
 
     overall_batches = 0
     last_val_loss = float("inf")
@@ -128,9 +133,10 @@ def run(
         net.to(dev)
         net.train()
         train_loss = 0.0
-        desc = f"Epoch {epoch + 1}/{epochs}"
+        desc_train = f"Epoch {epoch + 1}/{epochs} Training"
+        desc_val = f"Epoch {epoch + 1}/{epochs} Validating"
         # Epoch progress bar
-        with tqdm(total=n_train, desc=desc, leave=False, position=0) as bar:
+        with tqdm(total=n_train, desc=desc_train, leave=False, position=0) as bar:
             # Training batches
             for batch in train_loader:
                 # Increment bar by batch size
@@ -143,17 +149,19 @@ def run(
                 # Load images and masks to computing device
                 images = images.to(device=dev, dtype=torch.float32)
                 masks = masks.to(device=dev, dtype=torch.float32)
-
+                # masks = torch.argmax(masks.squeeze(), dim=1)
                 # Clear old gradients and loss backpropagation
                 optimizer.zero_grad()
+
 
                 # Predict masks from images
                 prediction = net(images)
 
+                prediction = torch.sigmoid(prediction)
+
                 # Calculate loss
                 loss = criterion(prediction, masks)
                 writer.add_scalar("Loss/train", loss, epoch)
-
                 loss.backward()
 
                 # nn.utils.clip_grad_value_(net.parameters(), 0.1)  # Why???
@@ -173,51 +181,45 @@ def run(
             0,
             0,
         )
-        old_iou, old_f1, old_acc, old_pre, old_rec = 0, 0, 0, 0, 0
 
         net.eval()
         # torch.cuda.empty_cache()
-        for batch in val_loader:
-            images = batch["image"]
-            masks = batch["mask"]
+        with tqdm(total=n_val, desc=desc_val, leave=False, position=0) as bar:
+            for batch in val_loader:
+                # Increment bar by batch size
+                bar.update(bs)
+                images = batch["image"]
+                masks = batch["mask"]
 
-            # Load images and masks to computing device
-            images = images.to(device=dev, dtype=torch.float32)
-            old_masks = masks.to(device=dev, dtype=torch.float32)
-            masks = masks.to(device=dev, dtype=torch.int)
+                # Load images and masks to computing device
+                images = images.to(device=dev)
+                masks = masks.to(device=dev)
+                # masks = torch.argmax(masks.squeeze(), dim=1)
 
-            with torch.no_grad():
-                prediction = net(images)
+                with torch.no_grad():
+                    prediction = net(images)
+                    loss = criterion(prediction, masks)
+                writer.add_scalar("Loss/val", loss, epoch)
+                valid_loss += loss.item()
 
-            loss = criterion(prediction, masks)
-            writer.add_scalar("Loss/val", loss, epoch)
-            valid_loss += loss.item()
+                # Threshold at 0.5
+                prediction = prediction > 0.5
+                # masks.type(torch.IntTensor)
+                from torchmetrics.functional import iou, f1, accuracy, precision, recall
 
-            # Threshold at 0.5
-            prediction = prediction > 0.5
-            # masks.type(torch.IntTensor)
-            from torchmetrics.functional import iou, f1, accuracy, precision, recall
-
-            iou_batch = iou_batch + iou(prediction, masks).item()
-            f1_batch = f1_batch + f1(prediction, masks, mdmc_average="global").item()
-            accuracy_batch = (
-                accuracy_batch
-                + accuracy(prediction, masks, mdmc_average="global").item()
-            )
-            precision_batch = (
-                precision_batch
-                + precision(prediction, masks, mdmc_average="global").item()
-            )
-            recall_batch = (
-                recall_batch + recall(prediction, masks, mdmc_average="global").item()
-            )
-
-            metrics = calculate_metrics(prediction, old_masks)
-            old_iou += metrics["iou"]
-            old_f1 += metrics["f1"]
-            old_acc += metrics["accuracy"]
-            old_pre += metrics["precision"]
-            old_rec += metrics["recall"]
+                iou_batch = iou_batch + iou(prediction, masks).item()
+                f1_batch = f1_batch + f1(prediction, masks, mdmc_average="global").item()
+                accuracy_batch = (
+                    accuracy_batch
+                    + accuracy(prediction, masks, mdmc_average="global").item()
+                )
+                precision_batch = (
+                    precision_batch
+                    + precision(prediction, masks, mdmc_average="global").item()
+                )
+                recall_batch = (
+                    recall_batch + recall(prediction, masks, mdmc_average="global").item()
+                )
 
         # Normalize Validation metrics
         valid_loss /= n_val
@@ -227,12 +229,6 @@ def run(
         pre_value = precision_batch / n_val
         rec_value = recall_batch / n_val
 
-        old_iou /= n_val
-        old_f1 /= n_val
-        old_acc /= n_val
-        old_pre /= n_val
-        old_rec /= n_val
-
         writer.add_scalar("metrics/IoU", iou_value, epoch)
         # writer.add_scalar("metrics/Accuracy", acc, epoch)
 
@@ -240,14 +236,12 @@ def run(
         val_msg = f"Epoch {epoch+1}\n"
         val_msg += f"Training Loss: {train_loss / len(train_loader)}\tValidation Loss: {valid_loss} {(Fore.RED + '↑')+Fore.RESET if valid_loss > last_val_loss else (Fore.GREEN +'↓')+Fore.RESET}\n"
         val_msg += f"Validation Scores:\n"
-        val_msg += (
-            f"   this IoU:   {iou_value:.3f} {old_iou:.3f}\tbest_IoU: {best_IoU:.3f}\n"
-        )
-        val_msg += f"   F1:         {f1_value:.3f}  {old_f1:.3f}\taccuracy:  {acc_value:.3f}   {old_acc:.3f}\n"
-        val_msg += f"   precision:  {pre_value:.3f} {old_pre:.3f}\trecall:   {rec_value:.3f}   {old_pre:.3f}\n"
+        val_msg += f"   this IoU:   {iou_value:.3f}\tbest_IoU: {best_IoU:.3f}\n"
+        val_msg += f"   F1:         {f1_value:.3f}\taccuracy:  {acc_value:.3f}\n"
+        val_msg += f"   precision:  {pre_value:.3f}\trecall:   {rec_value:.3f}\n"
 
         print(val_msg)
-        logging.info(val_msg)
+        logging.info(val_msg.encode('utf-8')) # without encoding you might get annoying warning outputs on windows
 
         # Validation logg
         logg_file_pth = os.path.join(log_path, f"{start_datetime.isoformat()}.csv")
@@ -292,7 +286,11 @@ def main():
 
     val_img = "/home/s0559816/Desktop/railway-segmentation/data/img/val"
     val_msk = "/home/s0559816/Desktop/railway-segmentation/data/msk/val"
-    weights_pth = None
+    # weights_path = "runs/1/weights/CP_epoch4.pth"
+    weights_path = None
+
+    number_classes = 1 # number of classes present excluding background
+    mapping = {0:0, 1:1}#, 2:2, 3:3}
 
     save_path = "runs"
 
@@ -317,10 +315,12 @@ def main():
         val_img,
         val_msk,
         resolution=(320, 160),
-        epochs=100,
+        number_classes=number_classes,
+        mapping = mapping,
+        epochs=50,
         bs=1,
         lr=1e-0,
-        weights_pth=weights_pth,
+        weights_path=weights_path,
         save_path=save_path,
     )
 

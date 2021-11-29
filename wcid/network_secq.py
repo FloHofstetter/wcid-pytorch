@@ -75,7 +75,7 @@ class NetSeq(nn.Module):
             nn.ConvTranspose2d(16, 16, kernel_size=(3, 3), padding=(1, 1)),
             nn.ReLU(),
             nn.ConvTranspose2d(16, 1, kernel_size=(3, 3), padding=(1, 1)),
-            nn.Sigmoid(),
+            # nn.Sigmoid(),
         )
 
     def forward(self, x):
